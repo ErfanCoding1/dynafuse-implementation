@@ -1,0 +1,103 @@
+import os
+import pandas as pd
+import numpy as np
+import ast
+import re
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+
+def parse_batch(batch_str):
+    """Convert a batch string to a flattened list of floats."""
+    try:
+        parsed = ast.literal_eval(batch_str)
+        if isinstance(parsed, list):
+            # If the list is nested, flatten it (assumes each sub-list has one element)
+            if len(parsed) > 0 and isinstance(parsed[0], list):
+                return [float(item[0]) for item in parsed if isinstance(item, list) and len(item) > 0]
+            else:
+                return [float(x) for x in parsed]
+        else:
+            return []
+    except Exception as e:
+        print(f"Error parsing batch: {batch_str}, Error: {e}")
+        return []
+
+def prepare_batches(data, sensor_col, batch_size=100):
+    """
+    Extract sensor data for each batch from the specified column.
+    Each row in the DataFrame corresponds to one batch.
+    """
+    batches = []
+    for idx, row in data.iterrows():
+        lst = row[sensor_col]
+        if not isinstance(lst, list):
+            lst = parse_batch(str(lst))
+        if len(lst) >= batch_size:
+            lst = lst[:batch_size]
+            batches.append(np.array(lst))
+    return batches
+
+def compute_batch_accuracy(model, batches, true_labels):
+    """
+    For each batch, use the model to predict and compute a continuous accuracy measure 
+    based on the average predicted probability versus the true label.
+    Returns a list of accuracy percentages.
+    """
+    batch_accuracies = []
+    for i, batch in enumerate(batches):
+        # Reshape batch to (1, batch_size, 1) for the model (assuming unimodal data)
+        X_input = np.expand_dims(batch, axis=(0, 2))
+        y_pred_prob = model.predict(X_input, verbose=0).flatten()
+        avg_pred_prob = np.mean(y_pred_prob)
+        error = abs(avg_pred_prob - true_labels[i])
+        accuracy = (1 - error) * 100
+        batch_accuracies.append(accuracy)
+    return batch_accuracies
+
+def main():
+    # Load sensor batch data (ground truth) from CSV 
+    data = pd.read_csv("with_my_dataset/sensor_batches.csv", dtype=str)
+    # Convert Stress_Label to int (ground truth label for each batch)
+    data['Stress_Label'] = data['Stress_Label'].astype(int)
+    
+    # Prepare batches for each sensor column
+    ppg_batches = prepare_batches(data, "PPG_Batch", batch_size=100)
+    eda_batches = prepare_batches(data, "EDA_Batch", batch_size=100)
+    ecg_batches = prepare_batches(data, "ECG_Batch", batch_size=100)
+    
+    # Determine the common number of batches among the three sensors
+    n_common = min(len(ppg_batches), len(eda_batches), len(ecg_batches))
+    ppg_batches = ppg_batches[:n_common]
+    eda_batches = eda_batches[:n_common]
+    ecg_batches = ecg_batches[:n_common]
+    
+    # Get the true labels for the batches; assume that the first n_common rows correspond to valid batches
+    true_labels = data['Stress_Label'].astype(int).tolist()[:n_common]
+    
+    # Debug: print the distribution of true labels
+    print("Distribution of true labels:", pd.Series(true_labels).value_counts())
+    
+    # Load unimodal models (assumes models are saved in with_my_dataset/saved_models folder)
+    ppg_model = load_model(os.path.join("with_my_dataset/saved_models", "model_PPG.h5"))
+    eda_model = load_model(os.path.join("with_my_dataset/saved_models", "model_EDA.h5"))
+    ecg_model = load_model(os.path.join("with_my_dataset/saved_models", "model_ECG.h5"))
+    
+    # Compute per-batch accuracy for each sensor using continuous measure
+    ppg_accuracies = compute_batch_accuracy(ppg_model, ppg_batches, true_labels)
+    eda_accuracies = compute_batch_accuracy(eda_model, eda_batches, true_labels)
+    ecg_accuracies = compute_batch_accuracy(ecg_model, ecg_batches, true_labels)
+    
+    # Create a DataFrame with common length arrays
+    results_df = pd.DataFrame({
+        "Batch_Index": list(range(1, n_common + 1)),
+        "Accuracy_PPG": ppg_accuracies,
+        "Accuracy_EDA": eda_accuracies,
+        "Accuracy_ECG": ecg_accuracies
+    })
+    
+    results_df.to_csv("with_my_dataset/per_batch_accuracies.csv", index=False)
+    print("Per-batch accuracies saved to with_my_dataset/per_batch_accuracies.csv")
+    print(results_df.head())
+
+if __name__ == "__main__":
+    main()
